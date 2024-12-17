@@ -1,52 +1,101 @@
-import BAC0
-import json
-import asyncio
+import bacpypes.app
+import bacpypes.object
+import bacpypes.primitivedata
+import bacpypes.task
 
-# Configuration
-BACNET_IP = "192.168.0.100:61892"
-LOCAL_IP = "192.168.0.100/24"
-PORT = 47809
-ANALOG_IDS = [20]  # List of analog input IDs
-DIGITAL_IDS = [10]  # List of digital input IDs
-READ_INTERVAL = 5  # Time interval in seconds for reading inputs
-
-async def read_bacnet_input(bacnet, device_ip, object_type, obj_id):
-    """Read a BACnet input and return the value or an error message."""
-    try:
-        # Use bacnet.read directly in the async function
-        value = bacnet.read(f"{device_ip} {object_type} {obj_id} presentValue")
-        return str(value)
-    except Exception as e:
-        return f"Error: {e}"
-
-async def main():
-    try:
-        # Establish BACnet connection
-        bacnet = BAC0.lite(ip=LOCAL_IP, port=PORT)
+class DeviceRegistrationApp(bacpypes.app.BIPSimpleApplication):
+    def __init__(self, device_address, device_id, local_address):
+        """
+        Initialize the BACnet device registration application
         
-        while True:
-            data = {}
+        :param device_address: IP address of the foreign device
+        :param device_id: Device instance number
+        :param local_address: Local network address
+        """
+        # Create a device object
+        self.device_object = bacpypes.object.DeviceObject(
+            objectIdentifier=('device', device_id),
+            objectName=f'Foreign Device {device_id}'
+        )
+        
+        # Initialize the application
+        super().__init__(
+            local_address, 
+            object_list=[self.device_object]
+        )
+        
+        # Store device parameters
+        self.foreign_device_address = device_address
 
-            # Read analog inputs
-            for analog_id in ANALOG_IDS:
-                value = await read_bacnet_input(bacnet, BACNET_IP, "analogInput", analog_id)
-                data[f"Analog_input_{analog_id}"] = value
+    def register_foreign_device(self):
+        """
+        Register the foreign device on the network
+        """
+        try:
+            # Attempt to register the foreign device
+            self.register_foreign_device_with_bbmd(
+                self.foreign_device_address, 
+                47808  # Standard BACnet UDP port
+            )
+            print(f"Successfully registered foreign device at {self.foreign_device_address}")
+        except Exception as e:
+            print(f"Device registration failed: {e}")
 
-            # Read digital inputs
-            for digital_id in DIGITAL_IDS:
-                value = await read_bacnet_input(bacnet, BACNET_IP, "binaryInput", digital_id)
-                data[f"Digital_input_{digital_id}"] = value
+    def read_all_present_values(self):
+        """
+        Read present values from all device objects
+        
+        :return: Dictionary of object identifiers and their present values
+        """
+        present_values = {}
+        
+        try:
+            # Discover all objects in the foreign device
+            objects = self.who_is(
+                low_limit=None, 
+                high_limit=None, 
+                device_address=self.foreign_device_address
+            )
+            
+            # Read present value for each object
+            for obj in objects:
+                try:
+                    value = self.read_property(
+                        obj.address, 
+                        obj.objectIdentifier, 
+                        'presentValue'
+                    )
+                    present_values[obj.objectIdentifier] = value
+                except Exception as read_error:
+                    print(f"Could not read value for {obj.objectIdentifier}: {read_error}")
+        
+        except Exception as discovery_error:
+            print(f"Object discovery failed: {discovery_error}")
+        
+        return present_values
 
-            # Print the collected data
-            print(json.dumps(data, indent=2))
+def main():
+    # Example usage
+    local_address = '192.168.1.100'  # Your local IP
+    foreign_device_address = '192.168.1.200'  # Foreign device IP
+    device_id = 1234  # Unique device instance number
 
-            await asyncio.sleep(READ_INTERVAL)
+    # Create device registration application
+    app = DeviceRegistrationApp(
+        foreign_device_address, 
+        device_id, 
+        local_address
+    )
 
-    except Exception as e:
-        print(f"Error establishing BACnet connection: {e}")
-    finally:
-        if 'bacnet' in locals():
-            bacnet.disconnect()
+    # Register the foreign device
+    app.register_foreign_device()
+
+    # Retrieve all present values
+    device_values = app.read_all_present_values()
+    
+    # Print retrieved values
+    for obj_id, value in device_values.items():
+        print(f"Object {obj_id}: Present Value = {value}")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
